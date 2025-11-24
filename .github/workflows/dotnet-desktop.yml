@@ -19,7 +19,7 @@ concurrency:
 jobs:
   build:
     name: Build & Deploy
-    if: github.repository_owner == 'CerealsConsuming' ## If you remove this change the Velopack packId from 'github.CerealsConsuming.eft' below.
+    if: github.repository_owner != 'lone-dma' ## If you remove this change the Velopack packId from 'github.lonedma.eft' below.
     runs-on: windows-latest
     environment: production
 
@@ -68,7 +68,7 @@ jobs:
       - name: Pack with Velopack
         run: |
           vpk pack `
-            --packId github.CerealsConsuming.eft `
+            --packId github.lonedma.eft `
             --packVersion "${{ steps.nbgv.outputs.SemVer2 }}" `
             --packDir "out" `
             --mainExe "Lone-EFT-DMA-Radar.exe" `
