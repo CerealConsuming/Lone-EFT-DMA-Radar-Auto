@@ -1,4 +1,4 @@
-﻿/*
+﻿﻿/*
  * Lone EFT DMA Radar
  * Brought to you by Lone (Lone DMA)
  * 
@@ -29,6 +29,7 @@ SOFTWARE.
 using Collections.Pooled;
 using LoneEftDmaRadar.DMA;
 using LoneEftDmaRadar.Misc;
+using LoneEftDmaRadar.Tarkov.GameWorld.Camera;
 using LoneEftDmaRadar.Tarkov.GameWorld.Loot;
 using LoneEftDmaRadar.Tarkov.GameWorld.Loot.Helpers;
 using LoneEftDmaRadar.Tarkov.GameWorld.Player.Helpers;
@@ -487,141 +488,88 @@ namespace LoneEftDmaRadar.Tarkov.GameWorld.Player
 
         /// <summary>
         /// Executed on each Realtime Loop.
-        /// Updated to better validate vertices and handle skeleton separately
+        /// Simplified to avoid over-validation that rejects valid data.
         /// </summary>
         public virtual void OnRealtimeLoop(VmmScatter scatter)
         {
-            // ✅ Early validation - SkeletonRoot is ALWAYS needed for position
+
             if (SkeletonRoot == null)
             {
-                Debug.WriteLine($"WARNING: SkeletonRoot is null for player '{Name}'");
                 IsError = true;
                 return;
             }
-        
-            // Calculate how many vertices we need
-            // - SkeletonRoot always needs vertices (for position updates)
-            // - Skeleton (if present) also needs vertices (for bone updates)
-            // They SHARE the same vertex buffer, so we read the max needed
-            int vertexCount = SkeletonRoot.Count; // Minimum needed for root position
-            
+
+            int vertexCount = SkeletonRoot.Count;
+
             if (Skeleton != null)
             {
-                // Skeleton bones may need more vertices than just the root
                 int skeletonMax = Skeleton.MaxBoneIndex + 1;
                 if (skeletonMax > vertexCount)
                     vertexCount = skeletonMax;
             }
-        
-            // ✅ Validate vertex count
+
+            // If vertexCount is obviously bogus, try to recover by rebinding transforms
             if (vertexCount <= 0 || vertexCount > 10000)
             {
-                Debug.WriteLine($"WARNING: Invalid vertex count {vertexCount} for player '{Name}'");
-                IsError = true;
-                return;
+                try
+                {
+                    Skeleton?.ResetAllTransforms();
+                    vertexCount = SkeletonRoot.Count;
+
+                    if (Skeleton != null)
+                    {
+                        int skeletonMax = Skeleton.MaxBoneIndex + 1;
+                        if (skeletonMax > vertexCount)
+                            vertexCount = skeletonMax;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"ERROR resetting transforms in OnRealtimeLoop for '{Name}': {ex}");
+                }
+
+                // If still bad after reset, give up for this frame
+                if (vertexCount <= 0 || vertexCount > 10000)
+                {
+                    IsError = true;
+                    return;
+                }
             }
-        
-            // Schedule reads
+
             scatter.PrepareReadValue<Vector2>(RotationAddress);
             scatter.PrepareReadArray<TrsX>(SkeletonRoot.VerticesAddr, vertexCount);
-        
+
             scatter.Completed += (sender, s) =>
             {
                 bool successRot = s.ReadValue<Vector2>(RotationAddress, out var rotation) && SetRotation(rotation);
                 bool successPos = false;
-        
+
                 if (s.ReadArray<TrsX>(SkeletonRoot.VerticesAddr, vertexCount) is PooledMemory<TrsX> vertices)
                 {
                     using (vertices)
                     {
                         try
                         {
-                            // ✅ Validate vertices span
-                            if (vertices.Span.Length < vertexCount)
+                            if (vertices.Span.Length >= vertexCount)
                             {
-                                Debug.WriteLine($"WARNING: Read {vertices.Span.Length} vertices but expected {vertexCount} for player '{Name}'");
-                            }
-                            else
-                            {
-                                // ✅ Validate vertex data quality before using
-                                bool hasValidData = false;
-                                for (int i = 0; i < Math.Min(3, vertices.Span.Length); i++)
-                                {
-                                    var pos = vertices.Span[i].t; // Use 't' field for translation/position
-                                    if (!float.IsNaN(pos.X) && !float.IsNaN(pos.Y) && !float.IsNaN(pos.Z) &&
-                                        !float.IsInfinity(pos.X) && !float.IsInfinity(pos.Y) && !float.IsInfinity(pos.Z) &&
-                                        Math.Abs(pos.X) < 10000 && Math.Abs(pos.Y) < 10000 && Math.Abs(pos.Z) < 10000)
-                                    {
-                                        hasValidData = true;
-                                        break;
-                                    }
-                                }
-        
-                                if (!hasValidData)
-                                {
-                                    Debug.WriteLine($"WARNING: Invalid vertex data for player '{Name}' - skipping update");
-                                }
-                                else
-                                {
-                                    // Update root position (ALWAYS needed)
-                                    // UpdatePosition returns ref Vector3, not bool
-                                    try
-                                    {
-                                        _ = SkeletonRoot.UpdatePosition(vertices.Span);
-                                        var pos = SkeletonRoot.Position;
-                                        
-                                        // Validate the result
-                                        if (!float.IsNaN(pos.X) && !float.IsNaN(pos.Y) && !float.IsNaN(pos.Z) &&
-                                            !float.IsInfinity(pos.X) && !float.IsInfinity(pos.Y) && !float.IsInfinity(pos.Z))
-                                        {
-                                            successPos = true;
-                                        }
-                                        else
-                                        {
-                                            Debug.WriteLine($"WARNING: Invalid position result for player '{Name}'");
-                                        }
-                                    }
-                                    catch (Exception ex)
-                                    {
-                                        Debug.WriteLine($"ERROR updating SkeletonRoot position for '{Name}': {ex}");
-                                        successPos = false;
-                                    }
-        
-                                    // Cache vertices for skeleton bones (if skeleton exists)
-                                    // This is SEPARATE from position updates - skeleton can be null
-                                    // but position updates still work
-                                    if (Skeleton != null && successPos)
-                                    {
-                                        bool successSkeleton = Skeleton.CacheVertices(vertices.Span);
-                                        
-                                        if (!successSkeleton)
-                                        {
-                                            // Only log occasionally to avoid spam during loading
-                                            if (DateTime.UtcNow.Second % 5 == 0)
-                                            {
-                                                Debug.WriteLine($"INFO: Skeleton vertices not yet valid for '{Name}' (normal during load)");
-                                            }
-                                        }
-                                    }
-                                }
+                                _ = SkeletonRoot.UpdatePosition(vertices.Span);
+                                successPos = true;
+                                Skeleton?.CacheVertices(vertices.Span);
                             }
                         }
                         catch (Exception ex)
                         {
-                            Debug.WriteLine($"ERROR processing vertices for Player '{Name}': {ex}");
+                            Debug.WriteLine($"ERROR updating position for '{Name}': {ex}");
+                            successPos = false;
                         }
                     }
                 }
-                else
-                {
-                    Debug.WriteLine($"WARNING: Failed to read vertices for player '{Name}'");
-                }
-        
-                // IsError is set if critical data (position/rotation) failed
-                // Skeleton failures are tracked separately within the Skeleton class
+
                 IsError = !successRot || !successPos;
             };
         }
+
+
 
         /// <summary>
         /// Executed on each Transform Validation Loop.
@@ -630,27 +578,47 @@ namespace LoneEftDmaRadar.Tarkov.GameWorld.Player
         /// <param name="round2">Index (round 2)</param>
         public void OnValidateTransforms(VmmScatter round1, VmmScatter round2)
         {
-            round1.PrepareReadPtr(SkeletonRoot.TransformInternal + UnitySDK.UnityOffsets.TransformAccess_HierarchyOffset); // Bone Hierarchy
+            if (SkeletonRoot == null)
+                return;
+
+            // Round 1: read hierarchy pointer
+            round1.PrepareReadPtr(SkeletonRoot.TransformInternal + UnitySDK.UnityOffsets.TransformAccess_HierarchyOffset);
             round1.Completed += (sender, x1) =>
             {
-                if (x1.ReadPtr(SkeletonRoot.TransformInternal + UnitySDK.UnityOffsets.TransformAccess_HierarchyOffset, out var tra))
+                if (!x1.ReadPtr(SkeletonRoot.TransformInternal + UnitySDK.UnityOffsets.TransformAccess_HierarchyOffset, out var tra) ||
+                    tra == 0)
+                    return;
+
+                // Round 2: read vertices pointer
+                round2.PrepareReadPtr(tra + UnitySDK.UnityOffsets.Hierarchy_VerticesOffset);
+                round2.Completed += (sender, x2) =>
                 {
-                    round2.PrepareReadPtr(tra + UnitySDK.UnityOffsets.Hierarchy_VerticesOffset); // Vertices Ptr
-                    round2.Completed += (sender, x2) =>
+                    if (!x2.ReadPtr(tra + UnitySDK.UnityOffsets.Hierarchy_VerticesOffset, out var verticesPtr) ||
+                        verticesPtr == 0)
+                        return;
+
+                    if (SkeletonRoot.VerticesAddr == verticesPtr)
+                        return;
+
+                    Debug.WriteLine($"[TransformValidate] SkeletonRoot Vertices changed for '{Name}' 0x{SkeletonRoot.VerticesAddr:X} -> 0x{verticesPtr:X}");
+
+                    // Re-wrap root (same TransformInternal, new hierarchy data)
+                    var newRoot = new UnityTransform(SkeletonRoot.TransformInternal);
+                    SkeletonRoot = newRoot;
+
+                    // IMPORTANT: also rebuild all bone transforms so they aren't stuck on old hierarchy
+                    try
                     {
-                        if (x2.ReadPtr(tra + UnitySDK.UnityOffsets.Hierarchy_VerticesOffset, out var verticesPtr))
-                        {
-                            if (SkeletonRoot.VerticesAddr != verticesPtr) // check if any addr changed
-                            {
-                                Debug.WriteLine($"WARNING - SkeletonRoot Transform has changed for Player '{Name}'");
-                                var transform = new UnityTransform(SkeletonRoot.TransformInternal);
-                                SkeletonRoot = transform;
-                            }
-                        }
-                    };
-                }
+                        Skeleton?.ResetAllTransforms();
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.WriteLine($"ERROR calling ResetAllTransforms for '{Name}': {ex}");
+                    }
+                };
             };
         }
+
 
         /// <summary>
         /// Set player rotation (Direction/Pitch)

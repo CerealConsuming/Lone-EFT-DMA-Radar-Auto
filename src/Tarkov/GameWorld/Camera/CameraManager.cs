@@ -20,6 +20,12 @@ namespace LoneEftDmaRadar.Tarkov.GameWorld.Camera
 {
     public sealed class CameraManager
     {
+        private static CameraManager _current;
+        public static CameraManager Current => _current;
+    
+        private Thread _initThread;
+        private bool _initThreadRunning;
+    
         public ulong FPSCamera { get; private set; }
         public ulong OpticCamera { get; private set; }
 
@@ -34,34 +40,36 @@ namespace LoneEftDmaRadar.Tarkov.GameWorld.Camera
         
         // Validation tracking
         private int _consecutiveMatrixFailures;
-        private const int MAX_MATRIX_FAILURES_BEFORE_RESET = 30; // ~3 seconds at 10fps
         private DateTime _lastValidMatrix = DateTime.MinValue;
         private bool _matrixInitialized;
-        
-        // Stuck matrix detection
-        private Matrix4x4 _lastMatrix;
-        private int _consecutiveIdenticalMatrices;
-        private const int MAX_IDENTICAL_MATRICES_BEFORE_RESET = 50; // ~5 seconds at 10fps
-        private DateTime _lastMatrixChange = DateTime.MinValue;
 
         private bool OpticCameraActive =>
             Memory.ReadValue<bool>(OpticCamera + UnitySDK.UnityOffsets.MonoBehaviour_IsAddedOffset, false);
 
         public CameraManager()
         {
+            _current = this;
+
             Debug.WriteLine("=== CameraManager Initialization ===");
             Debug.WriteLine($"Unity Base: 0x{Memory.UnityBase:X}");
             Debug.WriteLine($"AllCameras Offset: 0x{UnitySDK.UnityOffsets.AllCameras:X}");
 
-            // Start a background thread to keep trying to initialize cameras
-            var initThread = new Thread(InitializationLoop)
+            StartInitThread();
+        }
+        private void StartInitThread()
+        {
+            // If a thread is already alive, don't spawn another
+            if (_initThread != null && _initThread.IsAlive)
+                return;
+
+            _initThreadRunning = true;
+            _initThread = new Thread(InitializationLoop)
             {
                 IsBackground = true,
                 Name = "CameraManager Initialization"
             };
-            initThread.Start();
+            _initThread.Start();
         }
-
         /// <summary>
         /// Background thread that keeps retrying camera initialization until successful
         /// </summary>
@@ -69,15 +77,13 @@ namespace LoneEftDmaRadar.Tarkov.GameWorld.Camera
         {
             int attemptNumber = 0;
             DateTime lastLogTime = DateTime.MinValue;
-            
-            // ✅ CRITICAL FIX: Wait for old raid's cameras to be destroyed
-            // When raid ends, old cameras remain in memory for a bit
-            // If we try immediately, we'll find the OLD cameras and use stale data
-            Debug.WriteLine("[CameraManager] Waiting 1 min for old raid cameras to be cleaned up...");
-            Thread.Sleep(60000);
-            Debug.WriteLine("[CameraManager] Starting camera search for new raid...");
 
-            while (!_matrixInitialized)
+            // Only do the “old raid cameras” wait when we’re starting from a fresh state
+            Debug.WriteLine("[CameraManager] Waiting 15 seconds for old raid cameras to be cleaned up...");
+            Thread.Sleep(15000);
+            Debug.WriteLine("[CameraManager] Starting camera search for raid...");
+
+            while (_initThreadRunning && !_matrixInitialized)
             {
                 try
                 {
@@ -90,14 +96,16 @@ namespace LoneEftDmaRadar.Tarkov.GameWorld.Camera
                         lastLogTime = DateTime.UtcNow;
                     }
 
-                    // Try to find cameras
                     if (TryInitializeCameras(shouldLog))
                     {
                         Debug.WriteLine($"[CameraManager] ✓✓✓ Successfully initialized after {attemptNumber} attempts! ✓✓✓");
-                        return; // Success!
+
+                        // Let the loop exit; thread will die.
+                        // On next raid, we will call StartInitThread() again.
+                        _initThreadRunning = false;
+                        return;
                     }
 
-                    // Wait before retrying (shorter wait for first few attempts)
                     Thread.Sleep(attemptNumber < 10 ? 500 : 1000);
                 }
                 catch (Exception ex)
@@ -119,6 +127,17 @@ namespace LoneEftDmaRadar.Tarkov.GameWorld.Camera
         {
             try
             {
+                // ✅ NEW: don't even try to lock in cameras until the raid / LocalGameWorld is ready
+                if (!Memory.InRaid || Memory.LocalPlayer == null)
+                {
+                    if (verbose)
+                    {
+                        Debug.WriteLine("[CameraManager] InRaid/LocalPlayer not ready yet - waiting for LocalGameWorld before camera init...");
+                    }
+                    return false;
+                }
+                Thread.Sleep(10000); // Give game a moment to spawn cameras
+
                 // Calculate AllCameras address
                 var allCamerasAddr = Memory.UnityBase + UnitySDK.UnityOffsets.AllCameras;
                 var allCamerasPtr = Memory.ReadPtr(allCamerasAddr, false);
@@ -209,7 +228,6 @@ namespace LoneEftDmaRadar.Tarkov.GameWorld.Camera
                 {
                     _matrixInitialized = true;
                     _lastValidMatrix = DateTime.UtcNow;
-                    _lastMatrixChange = DateTime.UtcNow;
                     
                     Debug.WriteLine("[CameraManager] ✓ FPS Camera validated successfully - READY!");
                     
@@ -250,23 +268,13 @@ namespace LoneEftDmaRadar.Tarkov.GameWorld.Camera
                 _opticMatrixAddress = GetMatrixAddress(OpticCamera);
                 
                 bool fpsValid = VerifyViewMatrix(_fpsMatrixAddress, "FPS (after reset)");
-                bool opticValid = VerifyViewMatrix(_opticMatrixAddress, "Optic (after reset)");
                 
-                // ✅ FIXED: Only require FPS to be valid
                 if (fpsValid)
                 {
                     _matrixInitialized = true;
                     _consecutiveMatrixFailures = 0;
-                    _consecutiveIdenticalMatrices = 0; // Reset stuck counter
                     _lastValidMatrix = DateTime.UtcNow;
-                    _lastMatrixChange = DateTime.UtcNow;
-                    _lastMatrix = default; // Clear last matrix
-                    Debug.WriteLine("[CameraManager] ✓ Matrix reset successful (FPS camera valid)");
-                    
-                    if (!opticValid)
-                    {
-                        Debug.WriteLine("[CameraManager] Note: Optic camera still invalid (normal until scoped)");
-                    }
+                    Debug.WriteLine("[CameraManager] ✓ Matrix reset successful");
                 }
                 else
                 {
@@ -284,7 +292,7 @@ namespace LoneEftDmaRadar.Tarkov.GameWorld.Camera
             try
             {
                 // Camera + 0x50 → GameObject
-                var gameObject = Memory.ReadPtr(cameraPtr + 0x50, false);
+                var gameObject = Memory.ReadPtr(cameraPtr + UnitySDK.UnityOffsets.Component_GameObjectOffset, false);
                 if (gameObject == 0 || gameObject > 0x7FFFFFFFFFFF)
                 {
                     Debug.WriteLine($"[GetMatrixAddress] Invalid GameObject: 0x{gameObject:X}");
@@ -292,10 +300,10 @@ namespace LoneEftDmaRadar.Tarkov.GameWorld.Camera
                 }
 
                 // GameObject + 0x50 → Pointer1
-                var ptr1 = Memory.ReadPtr(gameObject + 0x50, false);
+                var ptr1 = Memory.ReadPtr(gameObject + UnitySDK.UnityOffsets.Component_GameObjectOffset, false);
                 if (ptr1 == 0 || ptr1 > 0x7FFFFFFFFFFF)
                 {
-                    Debug.WriteLine($"[GetMatrixAddress] Invalid Ptr1 (GameObject+0x50): 0x{ptr1:X}");
+                    Debug.WriteLine($"[GetMatrixAddress] Invalid Ptr1 (GameObject+{UnitySDK.UnityOffsets.Component_GameObjectOffset}): 0x{ptr1:X}");
                     return 0;
                 }
 
@@ -317,195 +325,118 @@ namespace LoneEftDmaRadar.Tarkov.GameWorld.Camera
         }
 
         /// <summary>
-        /// Verify that a matrix contains reasonable data
+        /// Validates the current view matrix.
+        /// Fixed to not rely on M44 value which changes with rotation.
+        /// </summary>
+        private bool ValidateCurrentMatrix(ref readonly Matrix4x4 vm)
+        {
+            // Check for NaN/Infinity (matrix is corrupted)
+            if (float.IsNaN(vm.M11) || float.IsInfinity(vm.M11) ||
+                float.IsNaN(vm.M22) || float.IsInfinity(vm.M22) ||
+                float.IsNaN(vm.M33) || float.IsInfinity(vm.M33) ||
+                float.IsNaN(vm.M44) || float.IsInfinity(vm.M44))
+            {
+                return false;
+            }
+
+            // Check for all-zeros (invalid matrix)
+            if (vm.M11 == 0f && vm.M22 == 0f && vm.M33 == 0f && vm.M44 == 0f)
+            {
+                return false;
+            }
+
+            // Check translation vector for reasonable world coordinates
+            // This catches menu/preview cameras which have unrealistic positions
+            float tx = vm.M41;
+            float ty = vm.M42;
+            float tz = vm.M43;
+
+            if (float.IsNaN(tx) || float.IsInfinity(tx) ||
+                float.IsNaN(ty) || float.IsInfinity(ty) ||
+                float.IsNaN(tz) || float.IsInfinity(tz))
+            {
+                return false;
+            }
+
+            // Check that translation is within reasonable game world bounds
+            if (Math.Abs(tx) > 5000f || Math.Abs(ty) > 5000f || Math.Abs(tz) > 5000f)
+            {
+                return false;
+            }
+
+            // ✅ NEW: reject “origin” matrices while in raid
+            if (Memory.InRaid)
+            {
+                float lenSq = tx * tx + ty * ty + tz * tz;
+                if (lenSq < 1.0f)
+                    return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Verifies a camera matrix address has valid data.
         /// </summary>
         private static bool VerifyViewMatrix(ulong matrixAddress, string name)
         {
-            try
-            {
-                // Read ViewMatrix at +0x118
-                var vm = Memory.ReadValue<Matrix4x4>(matrixAddress + 0x118, false);
-
-                // Check if normalized
-                float rightMag = MathF.Sqrt(vm.M11 * vm.M11 + vm.M12 * vm.M12 + vm.M13 * vm.M13);
-                float upMag = MathF.Sqrt(vm.M21 * vm.M21 + vm.M22 * vm.M22 + vm.M23 * vm.M23);
-                float fwdMag = MathF.Sqrt(vm.M31 * vm.M31 + vm.M32 * vm.M32 + vm.M33 * vm.M33);
-
-                if (!string.IsNullOrEmpty(name))
-                {
-                    Debug.WriteLine($"\n{name} Matrix @ 0x{matrixAddress:X}:");
-                    Debug.WriteLine($"  M44: {vm.M44:F6}");
-                    Debug.WriteLine($"  Translation: ({vm.M41:F2}, {vm.M42:F2}, {vm.M43:F2})");
-                    Debug.WriteLine($"  Right mag: {rightMag:F4}, Up mag: {upMag:F4}, Fwd mag: {fwdMag:F4}");
-                    Debug.WriteLine($"  Right: ({vm.M11:F3}, {vm.M12:F3}, {vm.M13:F3})");
-                    Debug.WriteLine($"  Up: ({vm.M21:F3}, {vm.M22:F3}, {vm.M23:F3})");
-                    Debug.WriteLine($"  Forward: ({vm.M31:F3}, {vm.M32:F3}, {vm.M33:F3})");
-                }
-
-                // Check for NaN or Infinity
-                bool hasInvalidValues = float.IsNaN(vm.M44) || float.IsInfinity(vm.M44) ||
-                                       float.IsNaN(rightMag) || float.IsInfinity(rightMag) ||
-                                       float.IsNaN(upMag) || float.IsInfinity(upMag) ||
-                                       float.IsNaN(fwdMag) || float.IsInfinity(fwdMag);
-
-                if (hasInvalidValues)
-                {
-                    if (!string.IsNullOrEmpty(name))
-                        Debug.WriteLine($"  ✓ Valid: False (NaN/Infinity detected)");
-                    return false;
-                }
-
-                // ✅ NEW: Check for identity/default matrix (indicates stale/uninitialized camera)
-                // M44 close to 1.0 with all vectors near zero = likely default/identity matrix
-                bool looksLikeIdentity = MathF.Abs(vm.M44 - 1.0f) < 0.01f &&  // M44 ≈ 1.0
-                                        rightMag < 0.1f &&                      // Right vector tiny
-                                        upMag < 0.1f &&                         // Up vector tiny  
-                                        fwdMag < 0.1f;                          // Forward vector tiny
-
-                if (looksLikeIdentity)
-                {
-                    if (!string.IsNullOrEmpty(name))
-                        Debug.WriteLine($"  ✓ Valid: False (appears to be identity/default matrix - camera not initialized)");
-                    return false;
-                }
-
-                // ✅ NEW: Check for all-zeros matrix (also indicates uninitialized)
-                bool looksLikeZeros = MathF.Abs(vm.M44) < 0.01f &&
-                                     rightMag < 0.01f &&
-                                     upMag < 0.01f &&
-                                     fwdMag < 0.01f;
-
-                if (looksLikeZeros)
-                {
-                    if (!string.IsNullOrEmpty(name))
-                        Debug.WriteLine($"  ✓ Valid: False (all zeros - camera not initialized)");
-                    return false;
-                }
-
-                // Check if at least ONE direction vector has reasonable magnitude
-                bool hasAtLeastOneValidVector = (rightMag > 0.01f && rightMag < 50.0f) ||
-                                                (upMag > 0.01f && upMag < 50.0f) ||
-                                                (fwdMag > 0.01f && fwdMag < 50.0f);
-
-                // ✅ NEW: Also require M44 to be significantly different from 1.0 for FPS camera
-                // Real camera matrices in-game typically have M44 values like 50-200+
-                // If M44 ≈ 1.0, it's likely a default/stale matrix
-                bool m44LooksRealistic = MathF.Abs(vm.M44) > 10.0f;  // Real values are typically 50-200+
-                
-                if (!m44LooksRealistic && !string.IsNullOrEmpty(name))
-                {
-                    Debug.WriteLine($"  ⚠️ Warning: M44 = {vm.M44:F6} seems unrealistic (expected > 10.0)");
-                }
-
-                bool isValid = hasAtLeastOneValidVector && m44LooksRealistic;
-                
-                if (!string.IsNullOrEmpty(name))
-                    Debug.WriteLine($"  ✓ Valid: {isValid}");
-                    
-                return isValid;
-            }
-            catch (Exception ex)
-            {
-                if (!string.IsNullOrEmpty(name))
-                    Debug.WriteLine($"ERROR verifying ViewMatrix for {name}: {ex}");
-                return false;
-            }
-        }
-
-        /// <summary>
-        /// Check if the matrix has changed since last read (not stuck/frozen)
-        /// </summary>
-        private bool IsMatrixChanging(ref readonly Matrix4x4 vm)
-        {
-            // Compare key components that should change as camera moves
-            // Using a small epsilon for floating point comparison
-            const float epsilon = 0.0001f;
+            var vm = Memory.ReadValue<Matrix4x4>(matrixAddress + UnitySDK.UnityOffsets.Camera_ViewMatrixOffset, false);
             
-            bool isIdentical = Math.Abs(vm.M14 - _lastMatrix.M14) < epsilon &&
-                              Math.Abs(vm.M24 - _lastMatrix.M24) < epsilon &&
-                              Math.Abs(vm.M44 - _lastMatrix.M44) < epsilon &&
-                              Math.Abs(vm.M41 - _lastMatrix.M41) < epsilon &&
-                              Math.Abs(vm.M42 - _lastMatrix.M42) < epsilon &&
-                              Math.Abs(vm.M43 - _lastMatrix.M43) < epsilon;
-            
-            if (isIdentical)
+            if (!string.IsNullOrEmpty(name))
             {
-                _consecutiveIdenticalMatrices++;
-                
-                // Only log occasionally
-                if (_consecutiveIdenticalMatrices % 25 == 0)
-                {
-                    Debug.WriteLine($"[CameraManager] Matrix appears frozen ({_consecutiveIdenticalMatrices} identical reads)");
-                }
-                
-                return false;
-            }
-            else
-            {
-                // Matrix changed - reset counter
-                _consecutiveIdenticalMatrices = 0;
-                _lastMatrixChange = DateTime.UtcNow;
-                _lastMatrix = vm;
-                return true;
-            }
-        }
-
-        /// <summary>
-        /// Check if we need to reset due to stuck matrix
-        /// </summary>
-        private bool ShouldResetDueToStuckMatrix()
-        {
-            // If matrix hasn't changed in a long time and we're supposedly in raid
-            if (_consecutiveIdenticalMatrices >= MAX_IDENTICAL_MATRICES_BEFORE_RESET)
-            {
-                Debug.WriteLine($"[CameraManager] Matrix stuck at same values for {_consecutiveIdenticalMatrices} reads - likely stale from previous raid");
-                return true;
+                Debug.WriteLine($"\n{name} Matrix @ 0x{matrixAddress:X}:");
+                Debug.WriteLine($"  M11: {vm.M11:F6}, M22: {vm.M22:F6}, M33: {vm.M33:F6}, M44: {vm.M44:F6}");
+                Debug.WriteLine($"  Translation: ({vm.M41:F2}, {vm.M42:F2}, {vm.M43:F2})");
             }
             
-            return false;
-        }
-        private bool ValidateCurrentMatrix(ref readonly Matrix4x4 vm)
-        {
             // Check for NaN/Infinity
-            if (float.IsNaN(vm.M11) || float.IsNaN(vm.M44) || float.IsNaN(vm.M14) ||
-                float.IsInfinity(vm.M11) || float.IsInfinity(vm.M44) || float.IsInfinity(vm.M14))
+            if (float.IsNaN(vm.M11) || float.IsInfinity(vm.M11) ||
+                float.IsNaN(vm.M22) || float.IsInfinity(vm.M22) ||
+                float.IsNaN(vm.M33) || float.IsInfinity(vm.M33) ||
+                float.IsNaN(vm.M44) || float.IsInfinity(vm.M44) ||
+                float.IsNaN(vm.M41) || float.IsInfinity(vm.M41))
             {
+                if (!string.IsNullOrEmpty(name))
+                    Debug.WriteLine($"  ✗ Invalid: Contains NaN/Infinity");
                 return false;
             }
 
-            // Calculate direction vector magnitudes
-            float rightMag = MathF.Sqrt(vm.M11 * vm.M11 + vm.M12 * vm.M12 + vm.M13 * vm.M13);
-            float upMag = MathF.Sqrt(vm.M21 * vm.M21 + vm.M22 * vm.M22 + vm.M23 * vm.M23);
-            float fwdMag = MathF.Sqrt(vm.M31 * vm.M31 + vm.M32 * vm.M32 + vm.M33 * vm.M33);
-
-            // ✅ Check for identity/default matrix (indicates stale camera from previous raid)
-            bool looksLikeIdentity = MathF.Abs(vm.M44 - 1.0f) < 0.01f &&
-                                    rightMag < 0.1f &&
-                                    upMag < 0.1f &&
-                                    fwdMag < 0.1f;
-
-            if (looksLikeIdentity)
+            // Check for all-zeros
+            if (vm.M11 == 0f && vm.M22 == 0f && vm.M33 == 0f && vm.M44 == 0f)
+            {
+                if (!string.IsNullOrEmpty(name))
+                    Debug.WriteLine($"  ✗ Invalid: All zeros");
                 return false;
+            }
 
-            // ✅ Check for all-zeros matrix
-            bool looksLikeZeros = MathF.Abs(vm.M44) < 0.01f &&
-                                 rightMag < 0.01f &&
-                                 upMag < 0.01f &&
-                                 fwdMag < 0.01f;
-
-            if (looksLikeZeros)
+            // Check translation is within reasonable bounds
+            if (Math.Abs(vm.M41) > 5000f || Math.Abs(vm.M42) > 5000f || Math.Abs(vm.M43) > 5000f)
+            {
+                if (!string.IsNullOrEmpty(name))
+                    Debug.WriteLine($"  ✗ Invalid: Translation out of bounds");
                 return false;
+            }
+            // ✅ NEW: reject origin-ish translations when we *are* in raid
+            // Menu/preview cameras often sit at (0,0,0)
+            if (Memory.InRaid)
+            {
+                float tx = vm.M41;
+                float ty = vm.M42;
+                float tz = vm.M43;
 
-            // Check if at least ONE direction vector has reasonable magnitude
-            bool hasAtLeastOneValidVector = (rightMag > 0.01f && rightMag < 50.0f) ||
-                                            (upMag > 0.01f && upMag < 50.0f) ||
-                                            (fwdMag > 0.01f && fwdMag < 50.0f);
+                float lenSq = tx * tx + ty * ty + tz * tz;
+                if (lenSq < 1.0f) // ~distance < 1m from origin
+                {
+                    if (!string.IsNullOrEmpty(name))
+                        Debug.WriteLine($"  ✗ Invalid: Translation too close to origin while in raid");
+                    return false;
+                }
+            }
 
-            // ✅ Require M44 to be significantly different from 1.0
-            // Real camera matrices typically have M44 values like 50-200+
-            bool m44LooksRealistic = MathF.Abs(vm.M44) > 10.0f;
+            if (!string.IsNullOrEmpty(name))
+                Debug.WriteLine($"  ✓ Valid: Matrix looks good");
 
-            return hasAtLeastOneValidVector && m44LooksRealistic;
+            return true;
         }
 
         private static (ulong fpsCamera, ulong opticCamera) FindCamerasByName(ulong listItemsPtr, int count, bool verbose)
@@ -530,7 +461,7 @@ namespace LoneEftDmaRadar.Tarkov.GameWorld.Camera
                         continue;
 
                     // Camera+0x50 -> GameObject
-                    var gameObjectPtr = Memory.ReadPtr(cameraPtr + 0x50, false);
+                    var gameObjectPtr = Memory.ReadPtr(cameraPtr + UnitySDK.UnityOffsets.Component_GameObjectOffset, false);
                     if (gameObjectPtr == 0 || gameObjectPtr > 0x7FFFFFFFFFFF)
                         continue;
 
@@ -600,20 +531,41 @@ namespace LoneEftDmaRadar.Tarkov.GameWorld.Camera
             MemDMA.ProcessStarting += MemDMA_ProcessStarting;
             MemDMA.ProcessStopped += MemDMA_ProcessStopped;
             MemDMA.RaidStopped += MemDMA_RaidStopped;
-            // No need for RaidStarted - we recreate the entire CameraManager per raid
         }
+        private static void MemDMA_RaidStopped(object sender, EventArgs e)
+        {
+            Debug.WriteLine("[CameraManager] Raid stopped - clearing camera state");
+
+            // Reset static view matrix so ESP doesn't use a stale one
+            var identity = Matrix4x4.Identity;
+            _viewMatrix.Update(ref identity);
+            EspRunning = false;
+
+            FPSCameraPtr = 0;
+            OpticCameraPtr = 0;
+            ActiveCameraPtr = 0;
+            _zoomLevel = 1.0f;
+            _fov = 0f;
+            _aspect = 0f;
+
+            if (_current is { } inst)
+            {
+                inst._matrixInitialized = false;
+                inst._consecutiveMatrixFailures = 0;
+                inst._lastValidMatrix = DateTime.MinValue;
+                inst._fpsMatrixAddress = 0;
+                inst._opticMatrixAddress = 0;
+                inst.FPSCamera = 0;
+                inst.OpticCamera = 0;
+
+                // ❌ REMOVE this line when MemDMA creates a fresh CameraManager each raid
+                // inst.StartInitThread();
+            }
+        }
+
 
         private static void MemDMA_ProcessStarting(object sender, EventArgs e) { }
         private static void MemDMA_ProcessStopped(object sender, EventArgs e) { }
-        
-        private static void MemDMA_RaidStopped(object sender, EventArgs e)
-        {
-            // Clear static state when raid ends
-            Debug.WriteLine("[CameraManager] Raid stopped - clearing camera state");
-            var Identity = Matrix4x4.Identity;
-            _viewMatrix.Update(ref Identity);
-            EspRunning = false;
-        }
 
         private bool CheckIfScoped(LocalPlayer localPlayer)
         {
@@ -649,16 +601,27 @@ namespace LoneEftDmaRadar.Tarkov.GameWorld.Camera
         {
             try
             {
+                // Don't do camera things if we aren't in a raid or local player isn't ready
+                if (!Memory.InRaid || localPlayer == null)
+                    return;
+
+                // Also don't touch matrices until init succeeded
+                if (!_matrixInitialized || FPSCamera == 0 || _fpsMatrixAddress == 0)
+                    return;
+
                 IsADS = localPlayer?.CheckIfADS() ?? false;
                 IsScoped = IsADS && CheckIfScoped(localPlayer);
 
-                // Choose active matrix address
                 ulong activeMatrixAddress = (IsADS && IsScoped) ? _opticMatrixAddress : _fpsMatrixAddress;
                 ulong activeCamera = (IsADS && IsScoped) ? OpticCamera : FPSCamera;
+
+                if (activeMatrixAddress == 0 || activeCamera == 0)
+                    return;
+
                 ActiveCameraPtr = activeCamera;
 
-                // Prepare all reads (batched into single DMA operation)
-                scatter.PrepareReadValue<Matrix4x4>(activeMatrixAddress + 0x120);
+                // Prepare reads...
+                scatter.PrepareReadValue<Matrix4x4>(activeMatrixAddress + UnitySDK.UnityOffsets.Camera_ViewMatrixOffset);
                 scatter.PrepareReadValue<float>(FPSCamera + UnitySDK.UnityOffsets.Camera_FOVOffset);
                 scatter.PrepareReadValue<float>(FPSCamera + UnitySDK.UnityOffsets.Camera_AspectRatioOffset);
                 scatter.PrepareReadValue<float>(activeCamera + UnitySDK.UnityOffsets.Camera_ZoomLevelOffset);
@@ -667,53 +630,27 @@ namespace LoneEftDmaRadar.Tarkov.GameWorld.Camera
                 {
                     try
                     {
-                        bool matrixValid = false;
-                        
-                        // Read matrix and validate it
-                        if (s.ReadValue<Matrix4x4>(activeMatrixAddress + 0x120, out var vm))
+                        if (s.ReadValue<Matrix4x4>(activeMatrixAddress + UnitySDK.UnityOffsets.Camera_ViewMatrixOffset, out var vm))
                         {
                             if (ValidateCurrentMatrix(in vm))
                             {
-                                // Check if matrix is stuck/frozen
-                                bool isChanging = IsMatrixChanging(in vm);
-                                
-                                // Check if we should reset due to stuck matrix
-                                if (ShouldResetDueToStuckMatrix())
+                                _viewMatrix.Update(ref vm);
+                                _consecutiveMatrixFailures = 0;
+                                _lastValidMatrix = DateTime.UtcNow;
+
+                                if (!_matrixInitialized)
                                 {
-                                    Debug.WriteLine("[CameraManager] Resetting due to stuck/frozen matrix (likely raid ended)");
-                                    ResetMatrixAddresses();
-                                }
-                                else
-                                {
-                                    _viewMatrix.Update(ref vm);
-                                    matrixValid = true;
-                                    _consecutiveMatrixFailures = 0;
-                                    _lastValidMatrix = DateTime.UtcNow;
-                                    
-                                    if (!_matrixInitialized)
-                                    {
-                                        _matrixInitialized = true;
-                                        _lastMatrix = vm;
-                                        _lastMatrixChange = DateTime.UtcNow;
-                                        Debug.WriteLine("[CameraManager] ✓ Matrix validated for first time");
-                                    }
+                                    _matrixInitialized = true;
+                                    Debug.WriteLine("[CameraManager] ✓ Matrix validated for first time in runtime");
                                 }
                             }
                             else
                             {
                                 _consecutiveMatrixFailures++;
-                                
-                                // Only log occasionally to avoid spam
+
                                 if (_consecutiveMatrixFailures % 10 == 0)
                                 {
-                                    Debug.WriteLine($"[CameraManager] Invalid matrix data detected ({_consecutiveMatrixFailures} consecutive failures)");
-                                }
-                                
-                                // Check if we need to reset
-                                if (_consecutiveMatrixFailures >= MAX_MATRIX_FAILURES_BEFORE_RESET)
-                                {
-                                    Debug.WriteLine($"[CameraManager] Too many consecutive matrix failures, attempting reset...");
-                                    ResetMatrixAddresses();
+                                    Debug.WriteLine($"[CameraManager] Invalid matrix - {_consecutiveMatrixFailures} consecutive failures");
                                 }
                             }
                         }
@@ -722,7 +659,21 @@ namespace LoneEftDmaRadar.Tarkov.GameWorld.Camera
                             _consecutiveMatrixFailures++;
                         }
 
-                        // Read other camera properties (even if matrix is invalid, we still want these)
+                        // Optional: if matrices are broken for a long time mid-raid, force re-init
+                        if (_consecutiveMatrixFailures >= 120)
+                        {
+                            Debug.WriteLine("[CameraManager] Too many invalid matrices, invalidating and restarting camera initialization");
+                            _matrixInitialized = false;
+                            _consecutiveMatrixFailures = 0;
+                            FPSCamera = 0;
+                            OpticCamera = 0;
+                            _fpsMatrixAddress = 0;
+                            _opticMatrixAddress = 0;
+                            FPSCameraPtr = OpticCameraPtr = ActiveCameraPtr = 0;
+                            StartInitThread();
+                            return;
+                        }
+
                         if (s.ReadValue<float>(FPSCamera + UnitySDK.UnityOffsets.Camera_FOVOffset, out var fov))
                             _fov = fov;
 
@@ -743,6 +694,7 @@ namespace LoneEftDmaRadar.Tarkov.GameWorld.Camera
                 Debug.WriteLine($"ERROR in CameraManager OnRealtimeLoop: {ex}");
             }
         }
+
 
         // Add field at top of class
         private static float _zoomLevel = 1.0f;

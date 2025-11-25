@@ -127,8 +127,7 @@ namespace LoneEftDmaRadar.Tarkov.GameWorld
                 };
                 _t4.PerformWork += MemWritesWorker_PerformWork;
 
-                // Start in Start() method
-                _t4.Start();      
+   
             }
             catch
             {
@@ -145,6 +144,7 @@ namespace LoneEftDmaRadar.Tarkov.GameWorld
             _t1.Start();
             _t2.Start();
             _t3.Start();
+            _t4.Start();
         }
 
         /// <summary>

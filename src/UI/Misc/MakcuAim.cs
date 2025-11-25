@@ -264,7 +264,7 @@ namespace LoneEftDmaRadar.UI.Misc
                 _dbgWithinDistance++;
 
                 // Check if skeleton exists
-                if (player.Skeleton?.BoneTransforms == null)
+                if (player.Skeleton?.Bones == null)
                     continue;
 
                 _dbgHaveSkeleton++;
@@ -273,7 +273,7 @@ namespace LoneEftDmaRadar.UI.Misc
                 float bestFovForThisPlayer = float.MaxValue;
                 bool anyBoneProjected = false;
 
-                foreach (var bone in player.Skeleton.BoneTransforms.Values)
+                foreach (var bone in player.Skeleton.Bones.Values)
                 {
                     // IMPORTANT: use same W2S style as ESP ¡ú "in" + default flags
                     if (CameraManager.WorldToScreen(in bone.Position, out var screenPos))
@@ -321,46 +321,47 @@ private bool ShouldTargetPlayer(AbstractPlayer player, LocalPlayer localPlayer)
     bool isDebugPlayer = _dbgTotalPlayers <= 3;
     
     if (isDebugPlayer)
-        Debug.WriteLine($"\n[Makcu] === Checking Player #{_dbgTotalPlayers} ===");
+        //Debug.WriteLine($"\n[Makcu] === Checking Player #{_dbgTotalPlayers} ===");
     
     // Don't target self
     if (player == localPlayer)
     {
-        if (isDebugPlayer) Debug.WriteLine($"  ? REJECTED: player == localPlayer");
+        if (isDebugPlayer) //Debug.WriteLine($"  ? REJECTED: player == localPlayer");
         return false;
     }
     
     if (player is LocalPlayer)
     {
-        if (isDebugPlayer) Debug.WriteLine($"  ? REJECTED: player is LocalPlayer");
+        if (isDebugPlayer) //Debug.WriteLine($"  ? REJECTED: player is LocalPlayer");
         return false;
     }
     
     if (!player.IsActive)
     {
-        if (isDebugPlayer) Debug.WriteLine($"  ? REJECTED: !IsActive");
+        if (isDebugPlayer) //Debug.WriteLine($"  ? REJECTED: !IsActive");
         return false;
     }
     
     if (!player.IsAlive)
     {
-        if (isDebugPlayer) Debug.WriteLine($"  ? REJECTED: !IsAlive");
+        if (isDebugPlayer) //Debug.WriteLine($"  ? REJECTED: !IsAlive");
         return false;
     }
 
     // Check player type filters
     if (player.Type == PlayerType.Teammate)
     {
-        if (isDebugPlayer) Debug.WriteLine($"  ? REJECTED: Type is Teammate");
+        if (isDebugPlayer) 
+        //Debug.WriteLine($"  ? REJECTED: Type is Teammate");
         return false;
     }
 
     if (isDebugPlayer)
     {
-        Debug.WriteLine($"  Player Type: {player.Type}");
-        Debug.WriteLine($"  Config Filters:");
-        Debug.WriteLine($"    PMC={Config.TargetPMC}, PScav={Config.TargetPlayerScav}");
-        Debug.WriteLine($"    AI={Config.TargetAIScav}, Boss={Config.TargetBoss}, Raider={Config.TargetRaider}");
+        //Debug.WriteLine($"  Player Type: {player.Type}");
+        //Debug.WriteLine($"  Config Filters:");
+        //Debug.WriteLine($"    PMC={Config.TargetPMC}, PScav={Config.TargetPlayerScav}");
+        //Debug.WriteLine($"    AI={Config.TargetAIScav}, Boss={Config.TargetBoss}, Raider={Config.TargetRaider}");
     }
 
     bool shouldTarget = player.Type switch
@@ -374,13 +375,13 @@ private bool ShouldTargetPlayer(AbstractPlayer player, LocalPlayer localPlayer)
         _ => false
     };
     
-    if (isDebugPlayer)
-    {
-        if (shouldTarget)
-            Debug.WriteLine($"  ? ACCEPTED!");
-        else
-            Debug.WriteLine($"  ? REJECTED: Type {player.Type} not in filters or default case");
-    }
+    //if (isDebugPlayer)
+    //{
+    //    if (shouldTarget)
+    //        Debug.WriteLine($"  ? ACCEPTED!");
+    //    else
+    //        Debug.WriteLine($"  ? REJECTED: Type {player.Type} not in filters or default case");
+    //}
     
     return shouldTarget;
 }
@@ -397,14 +398,14 @@ private bool ShouldTargetPlayer(AbstractPlayer player, LocalPlayer localPlayer)
                 return false;
 
             // Check if skeleton exists
-            if (target.Skeleton?.BoneTransforms == null)
+            if (target.Skeleton?.Bones == null)
                 return false;
 
             // Compute min FOV distance for this target
             float minFov = float.MaxValue;
             bool anyBoneProjected = false;
 
-            foreach (var bone in target.Skeleton.BoneTransforms.Values)
+            foreach (var bone in target.Skeleton.Bones.Values)
             {
                 if (CameraManager.WorldToScreen(in bone.Position, out var screenPos))
                 {
@@ -447,14 +448,14 @@ private bool ShouldTargetPlayer(AbstractPlayer player, LocalPlayer localPlayer)
         private void AimAtTarget(LocalPlayer localPlayer, AbstractPlayer target, Vector3 fireportPos)
         {
             // Check if skeleton exists
-            if (target.Skeleton?.BoneTransforms == null)
+            if (target.Skeleton?.Bones == null)
                 return;
 
             // Get target bone position
-            if (!target.Skeleton.BoneTransforms.TryGetValue(Config.TargetBone, out var boneTransform))
+            if (!target.Skeleton.Bones.TryGetValue(Config.TargetBone, out var boneTransform))
             {
                 // Fallback to chest if configured bone not found
-                if (!target.Skeleton.BoneTransforms.TryGetValue(Bones.HumanSpine3, out boneTransform))
+                if (!target.Skeleton.Bones.TryGetValue(Bones.HumanSpine3, out boneTransform))
                     return;
             }
 
@@ -495,74 +496,74 @@ private bool ShouldTargetPlayer(AbstractPlayer player, LocalPlayer localPlayer)
                 Debug.WriteLine($"[MakcuAimbot] Aiming at target {target.Name}: Move({moveX}, {moveY})");
             }
         }
-        private void ApplyMemoryAim(LocalPlayer localPlayer, Vector3 targetPosition)
-        {
-            try
-            {
-                var firearmManager = localPlayer.FirearmManager;
-                if (firearmManager == null)
-                    return;
-        
-                var fireportPos = firearmManager.FireportPosition;
-                if (!fireportPos.HasValue || fireportPos.Value == Vector3.Zero)
-                    return;
-        
-                var fpPos = fireportPos.Value;
-                Vector2 aimAngle = CalcAngle(fpPos, targetPosition);
-                ulong movementContext = localPlayer.MovementContext;
-                Vector2 viewAngles = Memory.ReadValue<Vector2>(
-                    movementContext + Offsets.MovementContext._rotation,
-                    false
-                );
-                Vector2 delta = aimAngle - viewAngles;
-                NormalizeAngle(ref delta);
-                Vector3 gunAngle = new Vector3(
-                    DegToRad(delta.X) / 1.5f,
-                    0.0f,
-                    DegToRad(delta.Y) / 1.5f
-                );
-                ulong shotDirectionAddr = localPlayer.PWA + Offsets.ProceduralWeaponAnimation._shotDirection;
-                if (!MemDMA.IsValidVirtualAddress(shotDirectionAddr))
-                    return;
-        
-                Vector3 writeVec = new Vector3(gunAngle.X, -1.0f, gunAngle.Z * -1.0f);
-                Memory.WriteValue(shotDirectionAddr, writeVec);
-            }
-            catch (Exception ex)
-            {
-                Debug.WriteLine($"[MemoryAim] Error: {ex}");
-            }
-        }
-        
-        
-        private static Vector2 CalcAngle(Vector3 from, Vector3 to)
-        {
-            Vector3 delta = from - to;
-            float length = delta.Length();
-        
-            return new Vector2(
-                RadToDeg((float)-Math.Atan2(delta.X, -delta.Z)),
-                RadToDeg((float)Math.Asin(delta.Y / length))
-            );
-        }
-        
-        private static void NormalizeAngle(ref Vector2 angle)
-        {
-            NormalizeAngle(ref angle.X);
-            NormalizeAngle(ref angle.Y);
-        }
-        
-        private static void NormalizeAngle(ref float angle)
-        {
-            while (angle > 180.0f) angle -= 360.0f;
-            while (angle < -180.0f) angle += 360.0f;
-        }
-        
-        private static float DegToRad(float degrees)
-            => degrees * ((float)Math.PI / 180.0f);
-        
-        private static float RadToDeg(float radians)
-            => radians * (180.0f / (float)Math.PI);
+private void ApplyMemoryAim(LocalPlayer localPlayer, Vector3 targetPosition)
+{
+    try
+    {
+        var firearmManager = localPlayer.FirearmManager;
+        if (firearmManager == null)
+            return;
+
+        var fireportPos = firearmManager.FireportPosition;
+        if (!fireportPos.HasValue || fireportPos.Value == Vector3.Zero)
+            return;
+
+        var fpPos = fireportPos.Value;
+        Vector2 aimAngle = CalcAngle(fpPos, targetPosition);
+        ulong movementContext = localPlayer.MovementContext;
+        Vector2 viewAngles = Memory.ReadValue<Vector2>(
+            movementContext + Offsets.MovementContext._rotation,
+            false
+        );
+        Vector2 delta = aimAngle - viewAngles;
+        NormalizeAngle(ref delta);
+        Vector3 gunAngle = new Vector3(
+            DegToRad(delta.X) / 1.5f,
+            0.0f,
+            DegToRad(delta.Y) / 1.5f
+        );
+        ulong shotDirectionAddr = localPlayer.PWA + Offsets.ProceduralWeaponAnimation._shotDirection;
+        if (!MemDMA.IsValidVirtualAddress(shotDirectionAddr))
+            return;
+
+        Vector3 writeVec = new Vector3(gunAngle.X, -1.0f, gunAngle.Z * -1.0f);
+        Memory.WriteValue(shotDirectionAddr, writeVec);
+    }
+    catch (Exception ex)
+    {
+        Debug.WriteLine($"[MemoryAim] Error: {ex}");
+    }
+}
+
+
+private static Vector2 CalcAngle(Vector3 from, Vector3 to)
+{
+    Vector3 delta = from - to;
+    float length = delta.Length();
+
+    return new Vector2(
+        RadToDeg((float)-Math.Atan2(delta.X, -delta.Z)),
+        RadToDeg((float)Math.Asin(delta.Y / length))
+    );
+}
+
+private static void NormalizeAngle(ref Vector2 angle)
+{
+    NormalizeAngle(ref angle.X);
+    NormalizeAngle(ref angle.Y);
+}
+
+private static void NormalizeAngle(ref float angle)
+{
+    while (angle > 180.0f) angle -= 360.0f;
+    while (angle < -180.0f) angle += 360.0f;
+}
+
+private static float DegToRad(float degrees)
+    => degrees * ((float)Math.PI / 180.0f);
+
+private static float RadToDeg(float radians)
+    => radians * (180.0f / (float)Math.PI);
 
         private Vector3 PredictHitPoint(LocalPlayer localPlayer, AbstractPlayer target, Vector3 fireportPos, Vector3 targetPos)
         {

@@ -74,6 +74,13 @@ namespace LoneEftDmaRadar.UI.Skia
             if (players == null || players.Count == 0)
                 return;
 
+            // Hard cap to avoid worst-case spam in crazy lobbies
+            const int MAX_PLAYERS_TO_DRAW = 64;
+
+            // Simple distance cull ¨C no need to draw people 600m away on ESP
+            const float MAX_ESP_DIST = 400.0f;
+            float maxDistSq = MAX_ESP_DIST * MAX_ESP_DIST;
+
             int skeletonsDrawn = 0;
             int skeletonsAttempted = 0;
             int skeletonsNotInitialized = 0;
@@ -82,24 +89,28 @@ namespace LoneEftDmaRadar.UI.Skia
             {
                 try
                 {
+                    // Distance cull using last known positions (cheap)
+                    var delta = player.Position - localPlayer.Position;
+                    if (delta.LengthSquared() > maxDistSq)
+                        continue;
+
                     skeletonsAttempted++;
-                    
-                    // Check if skeleton exists
-                    if (player.Skeleton == null)
-                    {
-                        continue; // Skip if no skeleton allocated
-                    }
-                    
-                    // Check if skeleton is initialized with valid data
-                    if (!player.Skeleton.IsInitialized)
+
+                    var skeleton = player.Skeleton;
+                    if (skeleton == null)
+                        continue;
+
+                    if (!skeleton.IsInitialized)
                     {
                         skeletonsNotInitialized++;
-                        continue; // Skip if not yet initialized with valid vertex data
+                        continue;
                     }
 
                     if (DrawPlayer(canvas, player, localPlayer))
                     {
                         skeletonsDrawn++;
+                        if (skeletonsDrawn >= MAX_PLAYERS_TO_DRAW)
+                            break; // hard cap for safety
                     }
                 }
                 catch (Exception ex)
@@ -108,21 +119,16 @@ namespace LoneEftDmaRadar.UI.Skia
                 }
             }
 
-            // Provide diagnostic information
             if (skeletonsAttempted > 0 && skeletonsDrawn == 0)
             {
                 if (skeletonsNotInitialized == skeletonsAttempted)
                 {
-                    // All skeletons are waiting for valid vertex data
-                    // This is normal during early game load - don't spam logs
-                    if (DateTime.UtcNow.Second % 5 == 0) // Log every 5 seconds
-                    {
-                        Debug.WriteLine($"[ESP] {skeletonsAttempted} players in raid but skeletons not yet initialized with valid vertex data.");
-                    }
+                    if (DateTime.UtcNow.Second % 5 == 0)
+                        Debug.WriteLine($"[ESP] {skeletonsAttempted} players, skeletons not initialized yet (waiting for realtime loop).");
                 }
                 else
                 {
-                    Debug.WriteLine($"[ESP] {skeletonsAttempted} players attempted, {skeletonsNotInitialized} not initialized, 0 drawn.");
+                    Debug.WriteLine($"[ESP] {skeletonsAttempted} attempted, {skeletonsNotInitialized} not initialized, 0 drawn.");
                 }
             }
         }
@@ -133,85 +139,100 @@ namespace LoneEftDmaRadar.UI.Skia
         private bool DrawPlayer(SKCanvas canvas, AbstractPlayer player, LocalPlayer localPlayer)
         {
             var skeleton = player.Skeleton;
-            
-            // Double-check initialization (defensive programming)
             if (skeleton == null || !skeleton.IsInitialized)
                 return false;
-
+        
             // Safely get head and pelvis
-            if (!skeleton.BoneTransforms.TryGetValue(Bones.HumanHead, out var head) ||
-                !skeleton.BoneTransforms.TryGetValue(Bones.HumanPelvis, out var pelvis))
+            if (!skeleton.Bones.TryGetValue(Bones.HumanHead, out var head) ||
+                !skeleton.Bones.TryGetValue(Bones.HumanPelvis, out var pelvis))
             {
                 return false;
             }
-
+        
             var headPos   = head.Position;
             var pelvisPos = pelvis.Position;
-
-            // World-space sanity check
+        
             if (!IsFinite(headPos) || !IsFinite(pelvisPos))
                 return false;
-
-            // Optional: skip totally insane world distances (wigged out bones far from player)
+        
+            // World-space sanity check (rough height between head & pelvis)
             float worldHeight = Math.Abs(pelvisPos.Y - headPos.Y);
-            if (worldHeight <= 0.01f || worldHeight > 5.0f * 3.0f) // head¨Cpelvis difference > ~15m? nope.
+            if (worldHeight <= 0.01f || worldHeight > 4.0f) // ~0¨C4m allowed
                 return false;
-
-            // World to screen
+        
+            // World->Screen
             if (!CameraManager.WorldToScreen(in headPos, out var headScreen, true))
                 return false;
-
+        
             if (!CameraManager.WorldToScreen(in pelvisPos, out var pelvisScreen, true))
                 return false;
-
-            // Screen-space sanity check
+        
             if (!IsFinite(headScreen) || !IsFinite(pelvisScreen))
                 return false;
-
-            // Get screen size from canvas
-            var bounds   = canvas.LocalClipBounds;
-            float scrW   = bounds.Width;
-            float scrH   = bounds.Height;
-
-            // Calculate box dimensions
+        
+            // Get screen bounds
+            var bounds = canvas.LocalClipBounds;
+            float scrW = bounds.Width;
+            float scrH = bounds.Height;
+        
+            // ©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤
+            // HARD CLAMP: only draw if both points are on-screen
+            // (with a tiny margin to avoid flicker on the edge)
+            // ©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤
+            const float MARGIN = 5f;
+        
+            bool headOnScreen =
+                headScreen.X >= -MARGIN && headScreen.X <= scrW + MARGIN &&
+                headScreen.Y >= -MARGIN && headScreen.Y <= scrH + MARGIN;
+        
+            bool pelvisOnScreen =
+                pelvisScreen.X >= -MARGIN && pelvisScreen.X <= scrW + MARGIN &&
+                pelvisScreen.Y >= -MARGIN && pelvisScreen.Y <= scrH + MARGIN;
+        
+            if (!headOnScreen || !pelvisOnScreen)
+                return false;
+        
+            // Length of the main segment (head -> pelvis)
+            float dx      = pelvisScreen.X - headScreen.X;
+            float dy      = pelvisScreen.Y - headScreen.Y;
+            float lineLen = MathF.Sqrt(dx * dx + dy * dy);
+        
+            if (lineLen <= 0.5f)
+                return false;
+        
+            // Also clamp against screen size: if it's taller than screen, skip
             float height = Math.Abs(pelvisScreen.Y - headScreen.Y);
-            if (height <= 0.1f)
-                return false;
-
             float width  = height * 0.5f;
-
-            // Reject insane sizes (this is what usually causes lines across the whole screen)
-            // - Taller than 2x screen height
-            // - Wider than screen width
-            if (height > scrH * 2.0f || width > scrW * 1.2f)
+        
+            if (height > scrH || width > scrW)
                 return false;
-
+        
             var boxRect = new SKRect(
                 headScreen.X - width / 2f,
                 headScreen.Y,
                 headScreen.X + width / 2f,
                 pelvisScreen.Y
             );
-
+        
             var paint = GetPaint(player);
-
-            // Draw box
+        
+            // Box
             canvas.DrawRect(boxRect, paint);
-
-            // Draw head dot
+        
+            // Head dot
             if (App.Config.ESP.ShowHeadDot)
             {
                 canvas.DrawCircle(headScreen.X, headScreen.Y, 3f, paint);
             }
-
-            // Draw name
+        
+            // Name
             if (App.Config.ESP.ShowNames)
             {
                 var namePos = new SKPoint(boxRect.MidX, boxRect.Top - 5);
                 canvas.DrawText(player.Name, namePos, SKTextAlign.Center, SKFonts.UIRegular, paint);
             }
-
-            // Draw distance
+        
+            // Distance
             if (App.Config.ESP.ShowDistance)
             {
                 float distance = Vector3.Distance(localPlayer.Position, player.Position);
@@ -219,9 +240,11 @@ namespace LoneEftDmaRadar.UI.Skia
                 var distPos    = new SKPoint(boxRect.MidX, boxRect.Bottom + 15);
                 canvas.DrawText(distText, distPos, SKTextAlign.Center, SKFonts.UIRegular, paint);
             }
-
+        
             return true;
         }
+
+
 
         private static SKPaint GetPaint(AbstractPlayer player)
         {

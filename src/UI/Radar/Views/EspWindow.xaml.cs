@@ -508,9 +508,9 @@ private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs
                 return false;
 
             // Get head and feet positions for proper box sizing
-            if (!player.Skeleton.BoneTransforms.TryGetValue(Tarkov.Unity.Structures.Bones.HumanHead, out var headTransform) ||
-                !player.Skeleton.BoneTransforms.TryGetValue(Tarkov.Unity.Structures.Bones.HumanLFoot, out var leftFootTransform) ||
-                !player.Skeleton.BoneTransforms.TryGetValue(Tarkov.Unity.Structures.Bones.HumanRFoot, out var rightFootTransform))
+            if (!player.Skeleton.Bones.TryGetValue(Tarkov.Unity.Structures.Bones.HumanHead, out var headTransform) ||
+                !player.Skeleton.Bones.TryGetValue(Tarkov.Unity.Structures.Bones.HumanLFoot, out var leftFootTransform) ||
+                !player.Skeleton.Bones.TryGetValue(Tarkov.Unity.Structures.Bones.HumanRFoot, out var rightFootTransform))
                 return false;
 
             // Head (remember: bone is roughly mid-head, not the top of the skull)
@@ -664,15 +664,17 @@ private void DrawPlayer(SKCanvas canvas, AbstractPlayer player, LocalPlayer loca
                 return;
 
             // Get head and feet positions for proper box sizing
-            if (!player.Skeleton.BoneTransforms.TryGetValue(Tarkov.Unity.Structures.Bones.HumanHead, out var headTransform) ||
-                !player.Skeleton.BoneTransforms.TryGetValue(Tarkov.Unity.Structures.Bones.HumanLFoot, out var leftFootTransform) ||
-                !player.Skeleton.BoneTransforms.TryGetValue(Tarkov.Unity.Structures.Bones.HumanRFoot, out var rightFootTransform))
+            if (!player.Skeleton.Bones.TryGetValue(Tarkov.Unity.Structures.Bones.HumanHead, out var headTransform) ||
+                !player.Skeleton.Bones.TryGetValue(Tarkov.Unity.Structures.Bones.HumanLFoot, out var leftFootTransform) ||
+                !player.Skeleton.Bones.TryGetValue(Tarkov.Unity.Structures.Bones.HumanRFoot, out var rightFootTransform))
                 return;
 
             if (!CameraManager.WorldToScreen(in headTransform.Position, out var headScreen, true))
                 return;
 
             // Use average of both feet for base
+            //var leftFootPos = leftFootTransform.Position;
+            //var rightFootPos = rightFootTransform.Position;
             var avgFootPos = (leftFootTransform.Position + rightFootTransform.Position) / 2f;
             if (!CameraManager.WorldToScreen(in avgFootPos, out var footScreen, true))
                 return;
