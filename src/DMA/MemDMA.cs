@@ -266,19 +266,17 @@ namespace LoneEftDmaRadar.DMA
                 try
                 {
                     var ct = Restart;
-                    
-                    // ✅ Create CameraManager for THIS raid (cameras are different per raid!)
-                    // Note: CameraManager now initializes in background thread, so this returns immediately
+
                     Debug.WriteLine("[MemDMA] Creating CameraManager for new raid...");
                     _cameraManager = new CameraManager();
                     MemDMA.CameraManager = _cameraManager;
                     CameraManager.UpdateViewportRes();
                     Debug.WriteLine("[MemDMA] CameraManager created (will initialize cameras in background)");
-                    
+
                     using (var game = Game = LocalGameWorld.CreateGameInstance(ct))
                     {
                         OnRaidStarted();
-                        
+
                         game.Start();
                         while (game.InRaid)
                         {
@@ -306,7 +304,7 @@ namespace LoneEftDmaRadar.DMA
                 finally
                 {            
                     OnRaidStopped();
-                    
+
                     // ✅ Cleanup camera manager when raid ends
                     if (_cameraManager != null)
                     {
@@ -314,7 +312,7 @@ namespace LoneEftDmaRadar.DMA
                         _cameraManager = null;
                         MemDMA.CameraManager = null;
                     }
-                    
+
                     Thread.Sleep(100);
                 }
             }
